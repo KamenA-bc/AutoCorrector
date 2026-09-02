@@ -1,0 +1,8 @@
+# Visual Studio temp & build files
+.vs/
+x64/
+x86/
+Debug/
+Release/
+*.user
+*.suo
