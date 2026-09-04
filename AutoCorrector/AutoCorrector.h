@@ -1,11 +1,11 @@
 #pragma once
 
-#include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
 typedef std::vector<std::string> Vector;
-typedef std::map<std::string, int> Dictionary;
+typedef std::unordered_map<std::string, int> Dictionary;
 
 class CAutoCorrector
 {
