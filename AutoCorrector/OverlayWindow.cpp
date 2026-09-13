@@ -17,8 +17,15 @@ OverlayWindow::~OverlayWindow()
 #ifdef _WIN32
     clearAll();
 
+    if (m_mouseHook)
+    {
+        UnhookWindowsHookEx(m_mouseHook);
+        m_mouseHook = nullptr;
+    }
+
     if (m_hwndPopup)
     {
+        KillTimer(m_hwndPopup, 1001);
         DestroyWindow(m_hwndPopup);
         m_hwndPopup = nullptr;
     }
@@ -41,6 +48,20 @@ OverlayWindow::~OverlayWindow()
 }
 
 #ifdef _WIN32
+
+LRESULT CALLBACK OverlayWindow::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && s_instance != nullptr)
+    {
+        if (wParam == WM_MOUSEMOVE)
+        {
+            auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+            s_instance->handleMouseMoveGlobal(ms->pt);
+        }
+    }
+
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
 
 bool OverlayWindow::initialize(HINSTANCE hInstance)
 {
@@ -91,7 +112,170 @@ bool OverlayWindow::initialize(HINSTANCE hInstance)
         TEXT("Segoe UI")
     );
 
+    // 5. Hook global mouse moves so hovering anywhere over the whole word opens suggestions
+    m_mouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, m_hInstance, 0);
+
+    // 6. Set 50ms tracking timer to follow scrolling/typing and remove manually corrected words
+    if (m_hwndPopup)
+    {
+        SetTimer(m_hwndPopup, 1001, 50, nullptr);
+    }
+
     return (m_hwndPopup != nullptr);
+}
+
+void OverlayWindow::handleMouseMoveGlobal(POINT pt)
+{
+    // If mouse is inside the popup card, keep popup open
+    if (m_popupVisible && m_hwndPopup)
+    {
+        RECT rcPopup;
+        GetWindowRect(m_hwndPopup, &rcPopup);
+        InflateRect(&rcPopup, 6, 6);
+        if (PtInRect(&rcPopup, pt))
+        {
+            return;
+        }
+    }
+
+    // Check if mouse is hovering over ANY word on screen (the whole word, not just the 4px line!)
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        RECT wordBox = m_items[i].screenRect;
+        // Expand box to cover the entire body of the word + padding + underline
+        wordBox.top -= 4;
+        wordBox.bottom += 8;
+        wordBox.left -= 4;
+        wordBox.right += 4;
+
+        if (PtInRect(&wordBox, pt))
+        {
+            showPopupForIndex(i);
+            return;
+        }
+    }
+
+    // If mouse is far away from words and popup, hide the popup card
+    if (m_popupVisible)
+    {
+        hidePopup();
+    }
+}
+
+void OverlayWindow::showPopupForIndex(size_t index)
+{
+    if (index >= m_items.size() || !m_hwndPopup) return;
+
+    if (m_activeHoveredIndex == static_cast<int>(index) && m_popupVisible)
+    {
+        return; // Already showing for this word
+    }
+
+    m_activeHoveredIndex = static_cast<int>(index);
+    const auto& item = m_items[index];
+
+    const int popupW = 220;
+    const int itemH = 28;
+    const int popupH = static_cast<int>(item.suggestions.size()) * itemH + 12;
+
+    int popupX = item.screenRect.left;
+    int popupY = item.screenRect.top - popupH - 4;
+    if (popupY < 20)
+    {
+        popupY = item.screenRect.bottom + 8;
+    }
+
+    SetWindowPos(m_hwndPopup, HWND_TOPMOST, popupX, popupY, popupW, popupH, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    m_popupVisible = true;
+    m_hoveredSuggestionIndex = -1;
+    InvalidateRect(m_hwndPopup, nullptr, TRUE);
+}
+
+void OverlayWindow::updatePositions()
+{
+    HWND fg = GetForegroundWindow();
+
+    for (size_t i = 0; i < m_items.size(); )
+    {
+        auto& item = m_items[i];
+
+        // 1. Hide underlines if the user switched to a different application
+        if (item.targetHwnd && item.targetHwnd != fg)
+        {
+            if (item.hwndUnderline && IsWindowVisible(item.hwndUnderline))
+            {
+                ShowWindow(item.hwndUnderline, SW_HIDE);
+            }
+            ++i;
+            continue;
+        }
+        else
+        {
+            if (item.hwndUnderline && !IsWindowVisible(item.hwndUnderline))
+            {
+                ShowWindow(item.hwndUnderline, SW_SHOWNOACTIVATE);
+            }
+        }
+
+        // 2. Check if word was manually corrected or deleted by the user!
+        if (item.pTextRange != nullptr)
+        {
+            BSTR bstr = nullptr;
+            if (SUCCEEDED(item.pTextRange->GetText(-1, &bstr)) && bstr)
+            {
+                std::wstring ws(bstr);
+                SysFreeString(bstr);
+                std::string curText(ws.begin(), ws.end());
+                while (!curText.empty() && (curText.back() == ' ' || curText.back() == '\n' || curText.back() == '\r' || curText.back() == '\t'))
+                {
+                    curText.pop_back();
+                }
+
+                if (curText != item.word)
+                {
+                    // User manually corrected the word or deleted it! Remove underline immediately!
+                    removeUnderline(item.id);
+                    continue; // item erased, don't increment i
+                }
+            }
+
+            // 3. Dynamically query current bounding box to follow typing, scrolling, or window moves!
+            SAFEARRAY* pRects = nullptr;
+            if (SUCCEEDED(item.pTextRange->GetBoundingRectangles(&pRects)) && pRects)
+            {
+                double* pData = nullptr;
+                if (SUCCEEDED(SafeArrayAccessData(pRects, reinterpret_cast<void**>(&pData))))
+                {
+                    long uBound = 0;
+                    SafeArrayGetUBound(pRects, 1, &uBound);
+                    if (uBound >= 3)
+                    {
+                        const LONG x = static_cast<LONG>(pData[0]);
+                        const LONG y = static_cast<LONG>(pData[1]);
+                        const LONG w = static_cast<LONG>(pData[2]);
+                        const LONG h = static_cast<LONG>(pData[3]);
+
+                        if (w > 0 && h > 0)
+                        {
+                            if (item.screenRect.left != x || item.screenRect.top != y ||
+                                item.screenRect.right != (x + w) || item.screenRect.bottom != (y + h))
+                            {
+                                item.screenRect.left = x;
+                                item.screenRect.top = y;
+                                item.screenRect.right = x + w;
+                                item.screenRect.bottom = y + h;
+
+                                SetWindowPos(item.hwndUnderline, HWND_TOPMOST, x, y + h - 2, w, 6, SWP_NOACTIVATE);
+                            }
+                        }
+                    }
+                    SafeArrayUnaccessData(pRects);
+                }
+                SafeArrayDestroy(pRects);
+            }
+        }
+        ++i;
+    }
 }
 
 void OverlayWindow::addUnderline(std::string_view word,
@@ -165,7 +349,7 @@ void OverlayWindow::addUnderline(std::string_view word,
     m_items.push_back(std::move(item));
 
     InvalidateRect(hwnd, nullptr, TRUE);
-    // CRITICAL: We DO NOT show m_hwndPopup! It only shows when the user hovers over an underline.
+    // CRITICAL: We DO NOT show m_hwndPopup! It only shows when the user hovers over the word.
 }
 
 void OverlayWindow::removeUnderline(size_t id)
@@ -353,63 +537,8 @@ void OverlayWindow::paintPopup(HDC hdc)
     SelectObject(hdc, hOldFont);
 }
 
-void OverlayWindow::onUnderlineMouseMove(HWND hwnd)
-{
-    const auto id = static_cast<size_t>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-
-    for (size_t i = 0; i < m_items.size(); ++i)
-    {
-        if (m_items[i].id == id)
-        {
-            m_activeHoveredIndex = static_cast<int>(i);
-            const auto& item = m_items[i];
-
-            const int popupW = 220;
-            const int itemH = 28;
-            const int popupH = static_cast<int>(item.suggestions.size()) * itemH + 12;
-
-            int popupX = item.screenRect.left;
-            int popupY = item.screenRect.top - popupH - 4;
-            if (popupY < 20)
-            {
-                popupY = item.screenRect.bottom + 8;
-            }
-
-            SetWindowPos(m_hwndPopup, HWND_TOPMOST, popupX, popupY, popupW, popupH, SWP_SHOWWINDOW | SWP_NOACTIVATE);
-            m_popupVisible = true;
-            m_hoveredSuggestionIndex = -1;
-            InvalidateRect(m_hwndPopup, nullptr, TRUE);
-            return;
-        }
-    }
-}
-
-void OverlayWindow::onUnderlineMouseLeave(HWND /*hwnd*/)
-{
-    POINT pt;
-    if (GetCursorPos(&pt) && m_hwndPopup)
-    {
-        RECT rcPopup;
-        GetWindowRect(m_hwndPopup, &rcPopup);
-        // Add a 5px margin so user can move mouse from underline into popup without closing
-        InflateRect(&rcPopup, 8, 8);
-        if (PtInRect(&rcPopup, pt))
-        {
-            return; // Mouse moved into popup card
-        }
-    }
-
-    hidePopup();
-}
-
 void OverlayWindow::onPopupMouseMove(int /*x*/, int y)
 {
-    TRACKMOUSEEVENT tme{};
-    tme.cbSize = sizeof(tme);
-    tme.dwFlags = TME_LEAVE;
-    tme.hwndTrack = m_hwndPopup;
-    TrackMouseEvent(&tme);
-
     if (m_activeHoveredIndex < 0 || m_activeHoveredIndex >= static_cast<int>(m_items.size()))
     {
         return;
@@ -456,27 +585,6 @@ void OverlayWindow::onPopupLButtonDown(int /*x*/, int y)
     }
 }
 
-void OverlayWindow::checkMouseLeavePopup()
-{
-    POINT pt;
-    if (GetCursorPos(&pt) && m_activeHoveredIndex >= 0 && m_activeHoveredIndex < static_cast<int>(m_items.size()))
-    {
-        const auto& item = m_items[m_activeHoveredIndex];
-        if (item.hwndUnderline)
-        {
-            RECT rcUnderline;
-            GetWindowRect(item.hwndUnderline, &rcUnderline);
-            InflateRect(&rcUnderline, 5, 5);
-            if (PtInRect(&rcUnderline, pt))
-            {
-                return; // Mouse moved back into underline
-            }
-        }
-    }
-
-    hidePopup();
-}
-
 LRESULT CALLBACK OverlayWindow::UnderlineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -489,34 +597,21 @@ LRESULT CALLBACK OverlayWindow::UnderlineWndProc(HWND hwnd, UINT msg, WPARAM wPa
         EndPaint(hwnd, &ps);
         return 0;
     }
-    case WM_MOUSEMOVE:
-    {
-        if (s_instance)
-        {
-            TRACKMOUSEEVENT tme{};
-            tme.cbSize = sizeof(tme);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hwnd;
-            TrackMouseEvent(&tme);
-
-            s_instance->onUnderlineMouseMove(hwnd);
-        }
-        return 0;
-    }
-    case WM_MOUSELEAVE:
-    {
-        if (s_instance)
-        {
-            s_instance->onUnderlineMouseLeave(hwnd);
-        }
-        return 0;
-    }
     case WM_LBUTTONDOWN:
     {
         // Clicking directly on the squiggly line chooses the #1 suggestion
         if (s_instance)
         {
-            s_instance->selectSuggestionIndex(1);
+            const auto id = static_cast<size_t>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            for (size_t i = 0; i < s_instance->m_items.size(); ++i)
+            {
+                if (s_instance->m_items[i].id == id)
+                {
+                    s_instance->m_activeHoveredIndex = static_cast<int>(i);
+                    s_instance->selectSuggestionIndex(1);
+                    break;
+                }
+            }
         }
         return 0;
     }
@@ -538,6 +633,14 @@ LRESULT CALLBACK OverlayWindow::PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_TIMER:
+    {
+        if (s_instance && wParam == 1001)
+        {
+            s_instance->updatePositions();
+        }
+        return 0;
+    }
     case WM_MOUSEMOVE:
     {
         if (s_instance)
@@ -554,14 +657,6 @@ LRESULT CALLBACK OverlayWindow::PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
         return 0;
     }
-    case WM_MOUSELEAVE:
-    {
-        if (s_instance)
-        {
-            s_instance->checkMouseLeavePopup();
-        }
-        return 0;
-    }
     default:
         break;
     }
@@ -574,8 +669,10 @@ bool OverlayWindow::initialize(HINSTANCE) { return false; }
 void OverlayWindow::addUnderline(std::string_view, const RECT&, const std::vector<std::string>&, IUIAutomationTextRange*, HWND) {}
 void OverlayWindow::removeUnderline(size_t) {}
 void OverlayWindow::clearAll() {}
+void OverlayWindow::showPopupForIndex(size_t) {}
 void OverlayWindow::hidePopup() {}
 bool OverlayWindow::selectSuggestionIndex(size_t) { return false; }
+void OverlayWindow::updatePositions() {}
 
 #endif
 

@@ -35,7 +35,9 @@ struct UnderlineItem
 /**
  * @brief Manages non-activating transparent overlay windows that render red squiggly
  * underlines beneath EVERY misspelled word on screen, and displays an interactive
- * Top 3 suggestion card ONLY when the user hovers over an underlined word.
+ * Top 3 suggestion card when the user hovers over ANY part of the word.
+ * Automatically tracks word movement (scrolling, typing) and removes underlines
+ * if the user manually corrects the word.
  */
 class OverlayWindow
 {
@@ -71,6 +73,11 @@ public:
     void clearAll();
 
     /**
+     * @brief Displays the Top 3 suggestion card for a specific word index.
+     */
+    void showPopupForIndex(size_t index);
+
+    /**
      * @brief Hides the suggestion popup card.
      */
     void hidePopup();
@@ -95,21 +102,23 @@ public:
         return m_items.empty() ? nullptr : &m_items.back();
     }
 
+    void updatePositions();
+
 private:
 #ifdef _WIN32
     static LRESULT CALLBACK UnderlineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 
     void paintUnderline(HWND hwnd, HDC hdc);
     void paintPopup(HDC hdc);
-    void onUnderlineMouseMove(HWND hwnd);
-    void onUnderlineMouseLeave(HWND hwnd);
     void onPopupMouseMove(int x, int y);
     void onPopupLButtonDown(int x, int y);
-    void checkMouseLeavePopup();
+    void handleMouseMoveGlobal(POINT pt);
 
     HINSTANCE m_hInstance{nullptr};
     HWND m_hwndPopup{nullptr};
+    HHOOK m_mouseHook{nullptr};
     HFONT m_hFont{nullptr};
     HFONT m_hFontBold{nullptr};
 #endif

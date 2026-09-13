@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <cstdint>
+#include <filesystem>
 
 CAutoCorrector::CAutoCorrector()
     : m_learner("user_profile.json")
@@ -162,48 +163,78 @@ void CAutoCorrector::recordUserAcceptedCorrection(std::string_view typo, std::st
 
 void CAutoCorrector::load(const std::string& filename)
 {
-    std::ifstream file(filename, std::ios_base::binary | std::ios_base::in);
-    if (!file.is_open())
-    {
-        std::cerr << "Error: Could not open dictionary file: " << filename << '\n';
-        return;
-    }
+    const std::string modernUnigrams = "frequency_dictionary_en_82_765.txt";
+    const std::string modernBigrams = "frequency_bigramdictionary_en_243_342.txt";
 
-    file.seekg(0, std::ios_base::end);
-    const auto length = file.tellg();
-    file.seekg(0, std::ios_base::beg);
-
-    std::string data(static_cast<std::size_t>(length), '\0');
-    file.read(&data[0], length);
-
-    // Tokenize using contraction-aware tokenizer
-    const auto tokens = AutoCorrect::tokenizeCorpus(data);
-
-    // Train language model (unigrams and bigrams)
-    m_languageModel.train(tokens);
-
-    // Compute word counts
     std::unordered_map<std::string, int> wordCounts;
-    wordCounts.reserve(32768);
-    for (const auto& token : tokens)
+    wordCounts.reserve(100000);
+
+    bool loadedModern = false;
+    if (std::filesystem::exists(modernUnigrams))
     {
-        wordCounts[token]++;
+        std::cout << "[Dictionary] Loading modern English unigram corpus (" << modernUnigrams << ")...\n";
+        std::ifstream uniFile(modernUnigrams);
+        std::string word;
+        int64_t rawFreq;
+        while (uniFile >> word >> rawFreq)
+        {
+            const std::string lower = AutoCorrect::toLowerString(word);
+            const int scaled = static_cast<int>(std::clamp<int64_t>(rawFreq / 1000LL, 10LL, 2000000000LL));
+            wordCounts[lower] = scaled;
+            m_languageModel.addWord(lower, scaled);
+        }
+        loadedModern = true;
+
+        if (std::filesystem::exists(modernBigrams))
+        {
+            std::cout << "[Dictionary] Loading Google Web 1T bigrams (" << modernBigrams << ")...\n";
+            std::ifstream biFile(modernBigrams);
+            std::string w1, w2;
+            while (biFile >> w1 >> w2 >> rawFreq)
+            {
+                const int scaled = static_cast<int>(std::clamp<int64_t>(rawFreq / 1000LL, 1LL, 2000000000LL));
+                m_languageModel.addBigram(AutoCorrect::toLowerString(w1), AutoCorrect::toLowerString(w2), scaled);
+            }
+        }
     }
 
-    // Ensure essential modern contractions and words have baseline frequencies
+    if (!loadedModern)
+    {
+        std::ifstream file(filename, std::ios_base::binary | std::ios_base::in);
+        if (file.is_open())
+        {
+            file.seekg(0, std::ios_base::end);
+            const auto length = file.tellg();
+            file.seekg(0, std::ios_base::beg);
+
+            std::string data(static_cast<std::size_t>(length), '\0');
+            file.read(&data[0], length);
+
+            const auto tokens = AutoCorrect::tokenizeCorpus(data);
+            m_languageModel.train(tokens);
+
+            for (const auto& token : tokens)
+            {
+                wordCounts[token]++;
+            }
+        }
+    }
+
+    // Modern contractions and essential technical words baseline
     const std::vector<std::pair<std::string, int>> modernBaseline = {
-        {"don't", 1500}, {"doesn't", 1200}, {"didn't", 1200},
-        {"won't", 1000}, {"can't", 1200}, {"couldn't", 800},
-        {"shouldn't", 800}, {"wouldn't", 800}, {"they're", 1000},
-        {"you're", 1200}, {"we're", 1000}, {"it's", 2000},
-        {"that's", 1000}, {"what's", 800}, {"who's", 600},
-        {"there's", 1000}, {"here's", 800}, {"isn't", 1000},
-        {"aren't", 800}, {"wasn't", 800}, {"weren't", 600},
-        {"haven't", 800}, {"hasn't", 600}, {"hadn't", 600},
-        {"website", 500}, {"online", 600}, {"email", 600},
-        {"github", 400}, {"code", 800}, {"software", 500},
-        {"lot", 800}, {"hate", 600}, {"heat", 600},
-        {"cook", 700}, {"coke", 500}, {"bunch", 600}
+        {"don't", 1500000}, {"doesn't", 1200000}, {"didn't", 1200000},
+        {"won't", 1000000}, {"can't", 1200000}, {"couldn't", 800000},
+        {"shouldn't", 800000}, {"wouldn't", 800000}, {"they're", 1000000},
+        {"you're", 1200000}, {"we're", 1000000}, {"it's", 2000000},
+        {"that's", 1000000}, {"what's", 800000}, {"who's", 600000},
+        {"there's", 1000000}, {"here's", 800000}, {"isn't", 1000000},
+        {"aren't", 800000}, {"wasn't", 800000}, {"weren't", 600000},
+        {"haven't", 800000}, {"hasn't", 600000}, {"hadn't", 600000},
+        {"website", 500000}, {"online", 600000}, {"email", 600000},
+        {"github", 400000}, {"code", 800000}, {"software", 500000},
+        {"lot", 800000}, {"hate", 600000}, {"heat", 600000},
+        {"cook", 700000}, {"coke", 500000}, {"bunch", 600000},
+        {"python", 600000}, {"vscode", 500000}
     };
 
     for (const auto& [w, count] : modernBaseline)
@@ -516,9 +547,9 @@ std::vector<std::string> CAutoCorrector::getTopSuggestions(std::string_view word
     const std::string splitWord = checkCompoundSplit(lower);
     if (!splitWord.empty())
     {
-        // Realistic compound split log probability
-        const double splitScore = -3.0 * 0.5 + 0.5 * std::log(100.0 / 1100000.0);
-        tier1.push_back({splitWord, splitScore, 0.5f});
+        // Realistic compound split log probability (dist 1.25f so genuine 1-edit single words like "bicycle" win over "by cycle")
+        const double splitScore = -3.0 * 1.25 + 0.5 * std::log(100.0 / 1100000.0);
+        tier1.push_back({splitWord, splitScore, 1.25f});
     }
 
     // Sort function by score descending
@@ -528,24 +559,33 @@ std::vector<std::string> CAutoCorrector::getTopSuggestions(std::string_view word
 
     std::vector<std::string> results;
 
-    // Strict Distance Priority: If Tier 1 candidates exist, Tier 2 is NEVER consulted!
+    // First, populate candidates from Tier 1 (distance <= 1.45)
     if (!tier1.empty())
     {
         std::sort(tier1.begin(), tier1.end(), sortByScore);
-        for (size_t i = 0; i < std::min(maxCount, tier1.size()); ++i)
+        for (const auto& item : tier1)
         {
-            results.push_back(AutoCorrect::applyCase(tier1[i].word, pattern));
+            if (results.size() >= maxCount) break;
+            const std::string formatted = AutoCorrect::applyCase(item.word, pattern);
+            if (std::find(results.begin(), results.end(), formatted) == results.end())
+            {
+                results.push_back(formatted);
+            }
         }
-        return results;
     }
 
-    // Only if zero Tier 1 candidates exist, consult Tier 2
-    if (!tier2.empty())
+    // Always fill remaining slots up to maxCount from Tier 2 so user receives all top suggestions!
+    if (results.size() < maxCount && !tier2.empty())
     {
         std::sort(tier2.begin(), tier2.end(), sortByScore);
-        for (size_t i = 0; i < tier2.size() && results.size() < maxCount; ++i)
+        for (const auto& item : tier2)
         {
-            results.push_back(AutoCorrect::applyCase(tier2[i].word, pattern));
+            if (results.size() >= maxCount) break;
+            const std::string formatted = AutoCorrect::applyCase(item.word, pattern);
+            if (std::find(results.begin(), results.end(), formatted) == results.end())
+            {
+                results.push_back(formatted);
+            }
         }
     }
 

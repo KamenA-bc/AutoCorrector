@@ -3,6 +3,9 @@
 #endif
 #include "CaretTracker.h"
 #include <iostream>
+#ifdef _WIN32
+#include <oleacc.h>
+#endif
 
 namespace AutoCorrect
 {
@@ -43,30 +46,28 @@ bool CaretTracker::getWordScreenRect(std::string_view word,
                                      IUIAutomationTextRange** ppOutRange)
 {
 #ifdef _WIN32
-    // 1. First try Windows UI Automation (works in modern browsers, Electron, VS Code, Discord, Word)
+    HWND fg = GetForegroundWindow();
+    if (fg)
+    {
+        // Wake up Chromium accessibility tree (VS Code, Chrome, Edge, Discord, Electron)
+        IAccessible* pAcc = nullptr;
+        AccessibleObjectFromWindow(fg, OBJID_CLIENT, IID_IAccessible, reinterpret_cast<void**>(&pAcc));
+        if (pAcc) pAcc->Release();
+    }
+
+    // 1. First try Windows UI Automation (works in modern editors, Electron, VS Code, Discord, Word)
     if (getViaUIA(word, hasTrailingDelimiter, outRect, ppOutRange))
     {
         return true;
     }
 
-    // 2. Fall back to classic Win32 GetGUIThreadInfo with exact font metrics
+    // 2. Fall back to classic Win32 GetGUIThreadInfo with exact font metrics (Notepad, WordPad, Win32)
     if (getViaWin32(word, hasTrailingDelimiter, outRect))
     {
         return true;
     }
 
-    // 3. Fallback: mouse cursor position
-    POINT pt;
-    if (GetCursorPos(&pt))
-    {
-        const int charWidth = 12;
-        const int wordWidth = static_cast<int>(word.size() > 0 ? word.size() : 4) * charWidth;
-        outRect.left = pt.x - wordWidth;
-        outRect.top = pt.y - 20;
-        outRect.right = pt.x;
-        outRect.bottom = pt.y;
-        return true;
-    }
+    // Never fall back to mouse cursor position - that causes lines to appear randomly at mouse pointer!
 #else
     (void)word;
     (void)hasTrailingDelimiter;
@@ -139,11 +140,17 @@ bool CaretTracker::getViaUIA(std::string_view /*word*/,
     IUIAutomationElement* pFocused = nullptr;
     if (FAILED(m_pAutomation->GetFocusedElement(&pFocused)) || !pFocused)
     {
-        return false;
+        HWND fg = GetForegroundWindow();
+        if (fg)
+        {
+            m_pAutomation->ElementFromHandle(fg, &pFocused);
+        }
     }
 
+    if (!pFocused) return false;
+
     IUIAutomationTextPattern* pTextPattern = nullptr;
-    const HRESULT hr = pFocused->GetCurrentPattern(UIA_TextPatternId, reinterpret_cast<IUnknown**>(&pTextPattern));
+    HRESULT hr = pFocused->GetCurrentPattern(UIA_TextPatternId, reinterpret_cast<IUnknown**>(&pTextPattern));
 
     if (SUCCEEDED(hr) && pTextPattern)
     {
