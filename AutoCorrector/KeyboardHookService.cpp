@@ -54,15 +54,18 @@ LRESULT CALLBACK KeyboardHookService::LowLevelKeyboardProc(int nCode, WPARAM wPa
 
         if (isKeyDown)
         {
-            // If user presses Escape and overlay is visible, dismiss overlay
-            if (kbd->vkCode == VK_ESCAPE && s_instance->m_overlay.isVisible())
+            // If user presses Escape, dismiss popup card or clear underlines
+            if (kbd->vkCode == VK_ESCAPE)
             {
-                s_instance->dismissOverlay();
-                return CallNextHookEx(nullptr, nCode, wParam, lParam);
+                if (s_instance->m_overlay.isPopupVisible())
+                {
+                    s_instance->m_overlay.hidePopup();
+                    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+                }
             }
 
-            // Check Alt+1, Alt+2, Alt+3 for instant suggestion picking when overlay is visible
-            if ((GetKeyState(VK_MENU) & 0x8000) != 0 && s_instance->m_overlay.isVisible())
+            // Check Alt+1, Alt+2, Alt+3 for suggestion picking
+            if ((GetKeyState(VK_MENU) & 0x8000) != 0)
             {
                 if (kbd->vkCode >= '1' && kbd->vkCode <= '3')
                 {
@@ -94,11 +97,21 @@ LRESULT CALLBACK KeyboardHookService::LowLevelKeyboardProc(int nCode, WPARAM wPa
 
 bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
 {
+    // Detect active window changes (e.g. user switches apps)
+    HWND fg = GetForegroundWindow();
+    if (fg != m_lastForegroundHwnd)
+    {
+        m_lastForegroundHwnd = fg;
+        m_currentWord.clear();
+        m_caretAtRecentWord = false;
+        m_overlay.clearAll();
+    }
+
     // Ignore keystrokes when Ctrl or Alt is held (navigation, shortcuts, copy/paste)
     if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 || (GetKeyState(VK_MENU) & 0x8000) != 0)
     {
         m_currentWord.clear();
-        dismissOverlay();
+        m_caretAtRecentWord = false;
         m_canUndo = false;
         return false;
     }
@@ -106,11 +119,11 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
     // Handle Backspace
     if (vkCode == VK_BACK)
     {
-        dismissOverlay();
         if (!m_currentWord.empty())
         {
             m_currentWord.pop_back();
         }
+        m_caretAtRecentWord = false;
         m_canUndo = false;
         return false;
     }
@@ -118,12 +131,12 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
     // Check for letters A-Z
     if (vkCode >= 'A' && vkCode <= 'Z')
     {
-        dismissOverlay();
         const bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool isCaps = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
         const char c = (isShift ^ isCaps) ? static_cast<char>(vkCode) : static_cast<char>(vkCode - 'A' + 'a');
 
         m_currentWord.push_back(c);
+        m_caretAtRecentWord = false;
         m_canUndo = false;
         return false;
     }
@@ -131,8 +144,8 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
     // Check for apostrophe (OEM_7)
     if (vkCode == VK_OEM_7)
     {
-        dismissOverlay();
         m_currentWord.push_back('\'');
+        m_caretAtRecentWord = false;
         m_canUndo = false;
         return false;
     }
@@ -151,12 +164,14 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
     {
         if (m_currentWord.size() >= 2)
         {
-            // If the word is an exact known word, record usage and preserve as valid
+            // If the word is an exact known word, record usage and leave intact
             if (m_corrector.isWordInDictionary(m_currentWord))
             {
-                dismissOverlay();
                 m_corrector.getLearner().recordWordUsage(m_currentWord);
                 m_previousWord = m_currentWord;
+                m_lastDelimitedWord = m_currentWord;
+                m_lastDelimitedChar = delimiter;
+                m_caretAtRecentWord = true;
                 m_currentWord.clear();
                 m_canUndo = false;
                 return false;
@@ -171,14 +186,14 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
                    (m_mode == ServiceMode::Hybrid && suggestions.size() > 1))
                 {
                     // OVERLAY MODE:
-                    // Display squiggly line at caret position
+                    // Underline EVERY wrong word with red squiggly wave.
+                    // DO NOT show popup now; only show popup when user hovers over squiggly line!
                     RECT wordRect{};
-                    if (m_caretTracker.getWordScreenRect(m_currentWord.size(), wordRect))
+                    IUIAutomationTextRange* pRange = nullptr;
+
+                    if (m_caretTracker.getWordScreenRect(m_currentWord, true, wordRect, &pRange))
                     {
-                        m_activeTypo = m_currentWord;
-                        m_activeDelimiter = delimiter;
-                        m_hasActiveDelimiter = true;
-                        m_overlay.showSquiggly(m_currentWord, wordRect, suggestions);
+                        m_overlay.addUnderline(m_currentWord, wordRect, suggestions, pRange, fg);
 
                         if (m_logCallback)
                         {
@@ -186,6 +201,9 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
                         }
                     }
 
+                    m_lastDelimitedWord = m_currentWord;
+                    m_lastDelimitedChar = delimiter;
+                    m_caretAtRecentWord = true;
                     m_previousWord = m_currentWord;
                     m_currentWord.clear();
                     m_canUndo = false;
@@ -205,7 +223,6 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
             }
             else
             {
-                dismissOverlay();
                 m_previousWord = m_currentWord;
                 m_currentWord.clear();
                 m_canUndo = false;
@@ -214,16 +231,15 @@ bool KeyboardHookService::handleKeystroke(DWORD vkCode, bool /*isKeyDown*/)
         }
         else
         {
-            dismissOverlay();
             m_canUndo = false;
             m_currentWord.clear();
             return false;
         }
     }
 
-    // Any other key resets current word and dismisses overlay
-    dismissOverlay();
+    // Any other key resets current word tracking
     m_currentWord.clear();
+    m_caretAtRecentWord = false;
     m_canUndo = false;
     return false;
 }
@@ -294,7 +310,7 @@ void KeyboardHookService::performAutoReplaceNoRace(std::string_view typo,
     m_lastDelimiter = delimiter;
 
     // Record accepted correction in AdaptiveLearner
-    m_corrector.getLearner().recordCorrectionAccepted(typo, correction);
+    m_corrector.recordUserAcceptedCorrection(typo, correction);
 
     if (m_logCallback)
     {
@@ -302,75 +318,120 @@ void KeyboardHookService::performAutoReplaceNoRace(std::string_view typo,
     }
 }
 
-void KeyboardHookService::performSuggestionReplacement(std::string_view original,
-                                                       std::string_view chosen,
-                                                       char delimiter)
+void KeyboardHookService::performSuggestionReplacement(const UnderlineItem& item,
+                                                       std::string_view chosen)
 {
     m_isInjecting.store(true);
 
-    std::vector<INPUT> inputs;
-
-    // 1. Backspace delimiter (if present) + original typo
-    const size_t backspaces = (m_hasActiveDelimiter ? 1 : 0) + original.size();
-    for (size_t i = 0; i < backspaces; ++i)
+    if (m_caretAtRecentWord && m_lastDelimitedWord == item.word)
     {
-        INPUT down{};
-        down.type = INPUT_KEYBOARD;
-        down.ki.wVk = VK_BACK;
-        inputs.push_back(down);
+        // Case 1: Word was the most recently typed word and caret is right after delimiter
+        std::vector<INPUT> inputs;
+        const size_t backspaces = 1 + item.word.size(); // 1 delimiter + word length
+        for (size_t i = 0; i < backspaces; ++i)
+        {
+            INPUT down{};
+            down.type = INPUT_KEYBOARD;
+            down.ki.wVk = VK_BACK;
+            inputs.push_back(down);
 
-        INPUT up{};
-        up.type = INPUT_KEYBOARD;
-        up.ki.wVk = VK_BACK;
-        up.ki.dwFlags = KEYEVENTF_KEYUP;
-        inputs.push_back(up);
-    }
+            INPUT up{};
+            up.type = INPUT_KEYBOARD;
+            up.ki.wVk = VK_BACK;
+            up.ki.dwFlags = KEYEVENTF_KEYUP;
+            inputs.push_back(up);
+        }
 
-    // 2. Type chosen replacement
-    for (char c : chosen)
-    {
-        INPUT down{};
-        down.type = INPUT_KEYBOARD;
-        down.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(c));
-        down.ki.dwFlags = KEYEVENTF_UNICODE;
-        inputs.push_back(down);
+        // Type chosen replacement
+        for (char c : chosen)
+        {
+            INPUT down{};
+            down.type = INPUT_KEYBOARD;
+            down.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(c));
+            down.ki.dwFlags = KEYEVENTF_UNICODE;
+            inputs.push_back(down);
 
-        INPUT up{};
-        up.type = INPUT_KEYBOARD;
-        up.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(c));
-        up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        inputs.push_back(up);
-    }
+            INPUT up{};
+            up.type = INPUT_KEYBOARD;
+            up.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(c));
+            up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+            inputs.push_back(up);
+        }
 
-    // 3. Re-type delimiter if was present
-    if (m_hasActiveDelimiter && delimiter != '\0')
-    {
+        // Re-type delimiter
         INPUT delimDown{};
         delimDown.type = INPUT_KEYBOARD;
-        delimDown.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(delimiter));
+        delimDown.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(m_lastDelimitedChar));
         delimDown.ki.dwFlags = KEYEVENTF_UNICODE;
         inputs.push_back(delimDown);
 
         INPUT delimUp{};
         delimUp.type = INPUT_KEYBOARD;
-        delimUp.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(delimiter));
+        delimUp.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(m_lastDelimitedChar));
         delimUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
         inputs.push_back(delimUp);
+
+        SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+        m_caretAtRecentWord = false;
+    }
+    else
+    {
+        // Case 2: Word was typed earlier in document.
+        // Select the entire word via UIA or double-click, then replace it completely.
+        bool selected = false;
+        if (item.pTextRange)
+        {
+            const HRESULT hr = item.pTextRange->Select();
+            selected = SUCCEEDED(hr);
+        }
+
+        if (!selected)
+        {
+            // Fallback: Double click the center of the word to select the entire word
+            POINT origPt;
+            GetCursorPos(&origPt);
+
+            const int cx = (item.screenRect.left + item.screenRect.right) / 2;
+            const int cy = (item.screenRect.top + item.screenRect.bottom) / 2;
+
+            SetCursorPos(cx, cy);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+
+            SetCursorPos(origPt.x, origPt.y);
+            Sleep(15);
+        }
+
+        // Now send replacement text to overwrite the entire selected word
+        std::vector<INPUT> inputs;
+        for (char c : chosen)
+        {
+            INPUT down{};
+            down.type = INPUT_KEYBOARD;
+            down.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(c));
+            down.ki.dwFlags = KEYEVENTF_UNICODE;
+            inputs.push_back(down);
+
+            INPUT up{};
+            up.type = INPUT_KEYBOARD;
+            up.ki.wScan = static_cast<WORD>(static_cast<unsigned char>(c));
+            up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+            inputs.push_back(up);
+        }
+
+        SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
     }
 
-    SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
     m_isInjecting.store(false);
 
     // Record accepted correction in AdaptiveLearner!
-    m_corrector.getLearner().recordCorrectionAccepted(original, chosen);
-    m_corrector.addUserWord(chosen, 50);
-    m_previousWord = std::string(chosen);
-
-    dismissOverlay();
+    m_corrector.recordUserAcceptedCorrection(item.word, chosen);
 
     if (m_logCallback)
     {
-        m_logCallback(original, chosen, false);
+        m_logCallback(item.word, chosen, false);
     }
 }
 
@@ -433,7 +494,6 @@ void KeyboardHookService::performUndo()
 
     // Record rejected correction in AdaptiveLearner!
     m_corrector.getLearner().recordCorrectionRejected(m_lastTypo, m_lastReplacement);
-    // Add typo to user dictionary so it won't be replaced again
     m_corrector.addUserWord(m_lastTypo, 100);
 
     if (m_logCallback)
@@ -445,24 +505,14 @@ void KeyboardHookService::performUndo()
     m_currentWord.clear();
 }
 
-void KeyboardHookService::dismissOverlay()
-{
-    if (m_overlay.isVisible())
-    {
-        m_overlay.hide();
-    }
-    m_activeTypo.clear();
-    m_hasActiveDelimiter = false;
-}
-
 void KeyboardHookService::run()
 {
     m_hookThreadId = GetCurrentThreadId();
 
     // Initialize Overlay window
     m_overlay.initialize(GetModuleHandle(nullptr));
-    m_overlay.setSuggestionCallback([this](std::string_view original, std::string_view chosen) {
-        this->performSuggestionReplacement(original, chosen, this->m_activeDelimiter);
+    m_overlay.setSuggestionCallback([this](const UnderlineItem& item, std::string_view chosen) {
+        this->performSuggestionReplacement(item, chosen);
     });
 
     m_hook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
@@ -476,13 +526,13 @@ void KeyboardHookService::run()
 
     m_running.store(true);
     std::cout << "[Daemon] AutoCorrector Service is active (Mode: "
-              << (m_mode == ServiceMode::Overlay ? "Interactive Overlay [Squiggly + Top 3 Suggestions]" : "Auto-Replace")
+              << (m_mode == ServiceMode::Overlay ? "Interactive Multi-Word Underline [Hover to Fix]" : "Auto-Replace")
               << ").\n"
               << "[Daemon] Running globally in all apps (Notepad, Chrome, VS Code, Discord, Word, etc.).\n"
-              << "[Daemon] - Misspelled words get red squiggly underlines.\n"
-              << "[Daemon] - Hover over squiggly line to see Top 3 suggestions.\n"
-              << "[Daemon] - Press Alt+1, Alt+2, or Alt+3 (or click) to apply suggestion.\n"
-              << "[Daemon] - Press Ctrl+Shift+Q in any app or Ctrl+C here to stop.\n\n";
+              << "[Daemon] - Every wrong word gets a red squiggly underline.\n"
+              << "[Daemon] - Hover over any squiggly line to reveal Top 3 suggestions.\n"
+              << "[Daemon] - Click a suggestion or press Alt+1, Alt+2, or Alt+3 to apply fix.\n"
+              << "[Daemon] - Press Ctrl+Shift+Q anywhere or Ctrl+C in console to stop.\n\n";
 
     MSG msg;
     while (m_running.load() && GetMessage(&msg, nullptr, 0, 0) > 0)
@@ -496,7 +546,7 @@ void KeyboardHookService::run()
 
 void KeyboardHookService::stop()
 {
-    dismissOverlay();
+    m_overlay.clearAll();
 
     if (m_hook != nullptr)
     {

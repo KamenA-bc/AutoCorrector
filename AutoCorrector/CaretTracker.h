@@ -11,12 +11,15 @@
 #include <uiautomation.h>
 #endif
 
+#include <string>
+#include <string_view>
+
 namespace AutoCorrect
 {
 
 /**
  * @brief Tracks the active application's caret and text bounding rectangle on Windows screens.
- * Uses Windows UI Automation (UIA) with fallback to Win32 GetGUIThreadInfo.
+ * Uses Windows UI Automation (UIA) with fallback to Win32 GetGUIThreadInfo and GDI font metrics.
  */
 class CaretTracker
 {
@@ -28,17 +31,22 @@ public:
     CaretTracker& operator=(const CaretTracker&) = delete;
 
     /**
-     * @brief Retrieves the screen bounding rectangle of the active text caret or typed word.
-     * @param wordLen Length of the current word to estimate bounding box if caret rect is a point.
-     * @param outRect Output screen rectangle (pixels).
+     * @brief Retrieves the exact screen bounding rectangle of the ENTIRE typed word.
+     * @param word The exact word text (used for font measurement).
+     * @param hasTrailingDelimiter True if caret is currently 1 position past the word (after space/punctuation).
+     * @param outRect Output screen rectangle (pixels) spanning from first character to last character.
+     * @param ppOutRange Optional output pointer to receive cloned IUIAutomationTextRange (caller must ->Release()).
      * @return true if successfully located, false otherwise.
      */
-    bool getWordScreenRect(size_t wordLen, RECT& outRect);
+    bool getWordScreenRect(std::string_view word,
+                           bool hasTrailingDelimiter,
+                           RECT& outRect,
+                           IUIAutomationTextRange** ppOutRange = nullptr);
 
 private:
 #ifdef _WIN32
-    bool getViaUIA(size_t wordLen, RECT& outRect);
-    bool getViaWin32(size_t wordLen, RECT& outRect);
+    bool getViaUIA(std::string_view word, bool hasTrailingDelimiter, RECT& outRect, IUIAutomationTextRange** ppOutRange);
+    bool getViaWin32(std::string_view word, bool hasTrailingDelimiter, RECT& outRect);
 
     IUIAutomation* m_pAutomation{nullptr};
     bool m_coInitialized{false};

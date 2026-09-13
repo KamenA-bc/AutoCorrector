@@ -8,23 +8,39 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <uiautomation.h>
 #endif
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace AutoCorrect
 {
 
+struct UnderlineItem
+{
+    size_t id{0};
+    std::string word;
+    RECT screenRect{0, 0, 0, 0};
+    std::vector<std::string> suggestions;
+#ifdef _WIN32
+    HWND hwndUnderline{nullptr};
+    IUIAutomationTextRange* pTextRange{nullptr};
+    HWND targetHwnd{nullptr};
+#endif
+};
+
 /**
- * @brief Manages the non-activating transparent overlay window that renders red squiggly
- * underlines beneath misspelled words and displays the interactive Top 3 suggestion card.
+ * @brief Manages non-activating transparent overlay windows that render red squiggly
+ * underlines beneath EVERY misspelled word on screen, and displays an interactive
+ * Top 3 suggestion card ONLY when the user hovers over an underlined word.
  */
 class OverlayWindow
 {
 public:
-    using SuggestionCallback = std::function<void(std::string_view original, std::string_view chosen)>;
+    using SuggestionCallback = std::function<void(const UnderlineItem& item, std::string_view chosen)>;
 
     OverlayWindow();
     ~OverlayWindow();
@@ -32,22 +48,32 @@ public:
     OverlayWindow(const OverlayWindow&) = delete;
     OverlayWindow& operator=(const OverlayWindow&) = delete;
 
-    /**
-     * @brief Initializes the overlay window class and handles.
-     */
     bool initialize(HINSTANCE hInstance);
 
     /**
-     * @brief Shows red squiggly underline at the specified word screen coordinates with candidate suggestions.
+     * @brief Adds a misspelled word to be underlined on screen.
+     * Crucial: This does NOT show any popup! It ONLY creates/shows the red squiggly underline.
      */
-    void showSquiggly(std::string_view word,
+    void addUnderline(std::string_view word,
                       const RECT& wordScreenRect,
-                      const std::vector<std::string>& topSuggestions);
+                      const std::vector<std::string>& topSuggestions,
+                      IUIAutomationTextRange* pTextRange = nullptr,
+                      HWND targetHwnd = nullptr);
 
     /**
-     * @brief Hides the squiggly line and any suggestion popup.
+     * @brief Removes a specific word's underline by its ID.
      */
-    void hide();
+    void removeUnderline(size_t id);
+
+    /**
+     * @brief Clears all active squiggly underlines on screen.
+     */
+    void clearAll();
+
+    /**
+     * @brief Hides the suggestion popup card.
+     */
+    void hidePopup();
 
     /**
      * @brief Sets callback triggered when a suggestion is clicked or chosen via hotkey.
@@ -58,36 +84,42 @@ public:
     }
 
     /**
-     * @brief Selects suggestion by 1-based index (e.g. 1, 2, 3).
+     * @brief Selects suggestion by 1-based index (1, 2, 3) for the currently hovered or most recent word.
      */
     bool selectSuggestionIndex(size_t index);
 
-    [[nodiscard]] bool isVisible() const noexcept { return m_visible; }
-    [[nodiscard]] std::string_view currentWord() const noexcept { return m_currentWord; }
+    [[nodiscard]] bool isPopupVisible() const noexcept { return m_popupVisible; }
+    [[nodiscard]] size_t getActiveWordCount() const noexcept { return m_items.size(); }
+    [[nodiscard]] const UnderlineItem* getMostRecentItem() const noexcept
+    {
+        return m_items.empty() ? nullptr : &m_items.back();
+    }
 
 private:
 #ifdef _WIN32
     static LRESULT CALLBACK UnderlineWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-    void paintUnderline(HDC hdc);
+    void paintUnderline(HWND hwnd, HDC hdc);
     void paintPopup(HDC hdc);
+    void onUnderlineMouseMove(HWND hwnd);
+    void onUnderlineMouseLeave(HWND hwnd);
     void onPopupMouseMove(int x, int y);
     void onPopupLButtonDown(int x, int y);
+    void checkMouseLeavePopup();
 
-    HWND m_hwndUnderline{nullptr};
+    HINSTANCE m_hInstance{nullptr};
     HWND m_hwndPopup{nullptr};
     HFONT m_hFont{nullptr};
     HFONT m_hFontBold{nullptr};
 #endif
 
-    bool m_visible{false};
-    bool m_popupVisible{false};
-    int m_hoveredIndex{-1};
+    std::vector<UnderlineItem> m_items;
+    size_t m_nextId{1};
 
-    std::string m_currentWord;
-    std::vector<std::string> m_suggestions;
-    RECT m_wordRect{0, 0, 0, 0};
+    int m_activeHoveredIndex{-1};
+    bool m_popupVisible{false};
+    int m_hoveredSuggestionIndex{-1};
 
     SuggestionCallback m_onSelected;
 

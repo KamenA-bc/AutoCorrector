@@ -37,17 +37,20 @@ CaretTracker::~CaretTracker()
 #endif
 }
 
-bool CaretTracker::getWordScreenRect(size_t wordLen, RECT& outRect)
+bool CaretTracker::getWordScreenRect(std::string_view word,
+                                     bool hasTrailingDelimiter,
+                                     RECT& outRect,
+                                     IUIAutomationTextRange** ppOutRange)
 {
 #ifdef _WIN32
     // 1. First try Windows UI Automation (works in modern browsers, Electron, VS Code, Discord, Word)
-    if (getViaUIA(wordLen, outRect))
+    if (getViaUIA(word, hasTrailingDelimiter, outRect, ppOutRange))
     {
         return true;
     }
 
-    // 2. Fall back to classic Win32 GetGUIThreadInfo (works in Notepad, WordPad, classic editors)
-    if (getViaWin32(wordLen, outRect))
+    // 2. Fall back to classic Win32 GetGUIThreadInfo with exact font metrics
+    if (getViaWin32(word, hasTrailingDelimiter, outRect))
     {
         return true;
     }
@@ -56,8 +59,8 @@ bool CaretTracker::getWordScreenRect(size_t wordLen, RECT& outRect)
     POINT pt;
     if (GetCursorPos(&pt))
     {
-        const int charWidth = 9;
-        const int wordWidth = static_cast<int>(wordLen > 0 ? wordLen : 5) * charWidth;
+        const int charWidth = 12;
+        const int wordWidth = static_cast<int>(word.size() > 0 ? word.size() : 4) * charWidth;
         outRect.left = pt.x - wordWidth;
         outRect.top = pt.y - 20;
         outRect.right = pt.x;
@@ -65,15 +68,17 @@ bool CaretTracker::getWordScreenRect(size_t wordLen, RECT& outRect)
         return true;
     }
 #else
-    (void)wordLen;
+    (void)word;
+    (void)hasTrailingDelimiter;
     (void)outRect;
+    (void)ppOutRange;
 #endif
     return false;
 }
 
 #ifdef _WIN32
 
-bool CaretTracker::getViaWin32(size_t wordLen, RECT& outRect)
+bool CaretTracker::getViaWin32(std::string_view word, bool hasTrailingDelimiter, RECT& outRect)
 {
     HWND fg = GetForegroundWindow();
     if (!fg) return false;
@@ -89,20 +94,45 @@ bool CaretTracker::getViaWin32(size_t wordLen, RECT& outRect)
         ClientToScreen(gti.hwndCaret, &pt1);
         ClientToScreen(gti.hwndCaret, &pt2);
 
-        const int charWidth = 9;
-        const int wordWidth = static_cast<int>(wordLen > 0 ? wordLen : 4) * charWidth;
+        // Measure exact font metrics for this window
+        HDC hdc = GetDC(gti.hwndCaret);
+        HFONT hFont = reinterpret_cast<HFONT>(SendMessage(gti.hwndCaret, WM_GETFONT, 0, 0));
+        HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
 
-        outRect.left = pt1.x - wordWidth;
+        SIZE szWord{};
+        SIZE szDelim{};
+        if (!GetTextExtentPoint32A(hdc, word.data(), static_cast<int>(word.size()), &szWord))
+        {
+            szWord.cx = static_cast<LONG>(word.size() * 11);
+            szWord.cy = 18;
+        }
+
+        if (hasTrailingDelimiter)
+        {
+            if (!GetTextExtentPoint32A(hdc, " ", 1, &szDelim))
+            {
+                szDelim.cx = 7;
+            }
+        }
+
+        if (oldFont) SelectObject(hdc, oldFont);
+        ReleaseDC(gti.hwndCaret, hdc);
+
+        const LONG delimOffset = hasTrailingDelimiter ? szDelim.cx : 0;
+        outRect.left = pt1.x - delimOffset - szWord.cx;
+        outRect.right = pt1.x - delimOffset;
         outRect.top = pt1.y;
-        outRect.right = pt1.x;
-        outRect.bottom = pt2.y > pt1.y ? pt2.y : pt1.y + 18;
+        outRect.bottom = (pt2.y > pt1.y) ? pt2.y : (pt1.y + (szWord.cy > 0 ? szWord.cy : 18));
         return true;
     }
 
     return false;
 }
 
-bool CaretTracker::getViaUIA(size_t wordLen, RECT& outRect)
+bool CaretTracker::getViaUIA(std::string_view /*word*/,
+                             bool hasTrailingDelimiter,
+                             RECT& outRect,
+                             IUIAutomationTextRange** ppOutRange)
 {
     if (!m_pAutomation) return false;
 
@@ -128,6 +158,16 @@ bool CaretTracker::getViaUIA(size_t wordLen, RECT& outRect)
                 IUIAutomationTextRange* pRange = nullptr;
                 if (SUCCEEDED(pRanges->GetElement(0, &pRange)) && pRange)
                 {
+                    // If caret is right after a delimiter, step back 1 character onto the word
+                    if (hasTrailingDelimiter)
+                    {
+                        int moved = 0;
+                        pRange->MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, -1, &moved);
+                    }
+
+                    // Expand to enclose the entire word
+                    pRange->ExpandToEnclosingUnit(TextUnit_Word);
+
                     SAFEARRAY* pRects = nullptr;
                     if (SUCCEEDED(pRange->GetBoundingRectangles(&pRects)) && pRects)
                     {
@@ -144,21 +184,27 @@ bool CaretTracker::getViaUIA(size_t wordLen, RECT& outRect)
                                 const double w = pData[2];
                                 const double h = pData[3];
 
-                                const int charWidth = 9;
-                                const int wordWidth = static_cast<int>(wordLen > 0 ? wordLen : 4) * charWidth;
+                                if (w > 0 && h > 0)
+                                {
+                                    outRect.left = static_cast<LONG>(x);
+                                    outRect.top = static_cast<LONG>(y);
+                                    outRect.right = static_cast<LONG>(x + w);
+                                    outRect.bottom = static_cast<LONG>(y + h);
 
-                                outRect.left = static_cast<LONG>(x - wordWidth);
-                                outRect.top = static_cast<LONG>(y);
-                                outRect.right = static_cast<LONG>(x + (w > 2.0 ? w : 2.0));
-                                outRect.bottom = static_cast<LONG>(y + (h > 10.0 ? h : 18.0));
+                                    SafeArrayUnaccessData(pRects);
+                                    SafeArrayDestroy(pRects);
 
-                                SafeArrayUnaccessData(pRects);
-                                SafeArrayDestroy(pRects);
-                                pRange->Release();
-                                pRanges->Release();
-                                pTextPattern->Release();
-                                pFocused->Release();
-                                return true;
+                                    if (ppOutRange)
+                                    {
+                                        pRange->Clone(ppOutRange);
+                                    }
+
+                                    pRange->Release();
+                                    pRanges->Release();
+                                    pTextPattern->Release();
+                                    pFocused->Release();
+                                    return true;
+                                }
                             }
                             SafeArrayUnaccessData(pRects);
                         }
