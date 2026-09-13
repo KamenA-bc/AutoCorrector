@@ -6,6 +6,9 @@ Debug/
 Release/
 *.user
 *.suo
+*.exe
+*.bin
+*.o
 
 ../.vs/
 ../x64/

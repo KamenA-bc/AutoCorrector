@@ -12,6 +12,18 @@
       "sourceType": "github",
       "skillPath": "skills/cpp-pro/SKILL.md",
       "computedHash": "ffbcae47a99c8b62753a35386936a2074f5d19509ab28407176f3e1b23e1dc08"
+    },
+    "windows-desktop-e2e": {
+      "source": "affaan-m/ecc",
+      "sourceType": "github",
+      "skillPath": "skills/windows-desktop-e2e/SKILL.md",
+      "computedHash": "9a7dad552c7ddcc29e43b65f1c05516a1905f6962fdca56ed6b14f80dad974d9"
+    },
+    "windows-ui-automation": {
+      "source": "martinholovsky/claude-skills-generator",
+      "sourceType": "github",
+      "skillPath": "skills/windows-ui-automation/SKILL.md",
+      "computedHash": "e3022ddc46af1108ad268e90ec82070bed763c1e0fa1f2e3921f801e62a99a01"
     }
   }
 }

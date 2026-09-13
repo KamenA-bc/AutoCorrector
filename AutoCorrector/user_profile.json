@@ -1,0 +1,36 @@
+{
+  "words": {
+    "per": 3,
+    "&": 3,
+    "backend": 3,
+    "whitelist": 3,
+    "constexpr": 3,
+    "github": 3,
+    "user": 3,
+    "terms)": 3,
+    "vscode": 3,
+    "async": 3,
+    "await": 3,
+    "frontend": 3,
+    "vocabulary": 3,
+    "antigravity": 3,
+    "slang,": 3,
+    "api": 3,
+    "names,": 3,
+    "word": 3,
+    "custom": 3,
+    "(jargon,": 3,
+    "technical": 3,
+    "one": 3,
+    "cmake": 3,
+    "python": 5,
+    "nullptr": 3,
+    "line": 3,
+    "add": 3
+  },
+  "corrections": [
+    {"typo": "pythn", "correct": "python", "count": 3}
+  ],
+  "rejections": [
+  ]
+}

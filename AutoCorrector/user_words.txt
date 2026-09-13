@@ -1,0 +1,13 @@
+# User Custom Whitelist & Vocabulary
+# Add one word per line (jargon, names, slang, technical terms)
+github
+vscode
+async
+await
+nullptr
+constexpr
+frontend
+backend
+API
+CMake
+Antigravity
